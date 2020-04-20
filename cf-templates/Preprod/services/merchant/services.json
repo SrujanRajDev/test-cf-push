@@ -1,0 +1,517 @@
+{
+	"Description": "Services",
+	"Parameters": {
+		"EnvironmentName": {
+			"Type": "String",
+			"Default": "preprod"
+		},
+		"ServiceName": {
+			"Type": "String",
+			"Default": "test"
+		},
+		"ClusterName": {
+			"Type": "String",
+			"Default": "infostretch"
+		},
+		"DesiredCount": {
+			"Type": "Number",
+			"Default": 1
+		},
+		"ContainerPort": {
+			"Type": "Number",
+			"Default": 8080
+		},
+		"ECSTaskRole": {
+			"Type": "String",
+			"Default": ""
+		},
+		"ECSServiceAutoscalingRole": {
+			"Type": "String",
+			"Default": ""
+		},
+		"Image": {
+			"Type": "String",
+			"Default": ""
+		},
+		"MemoryReservation": {
+			"Type": "Number",
+			"Default": 512
+		},
+		"ScaleMinCapacity": {
+			"Type": "Number",
+			"Default": 1
+		},
+		"ScaleMaxCapacity": {
+			"Type": "Number",
+			"Default": 5
+		},
+		"ScaleUpThreshold": {
+			"Type": "Number",
+			"Default": 75
+		},
+		"ScaleDownThreshold": {
+			"Type": "Number",
+			"Default": 30
+		},
+		"NameSpaceId": {
+			"Type": "String",
+			"Default": "ns-pb4sdc6zkeui2ifg"
+		}
+	},
+	"Resources": {
+		"ECSServiceLogGroup": {
+			"Type": "AWS::Logs::LogGroup",
+			"Properties": {
+				"LogGroupName": {
+					"Fn::Join": [
+						"", [
+							"Logs-ECS-", {
+								"Ref": "ClusterName"
+							}, "-", {
+								"Ref": "ServiceName"
+							}
+						]
+					]
+				},
+				"RetentionInDays": 30
+			}
+		},
+		"ServiceTaskDefinition": {
+			"Type": "AWS::ECS::TaskDefinition",
+			"Properties": {
+				"ContainerDefinitions": [{
+					"Name": {
+						"Fn::Join": [
+							"", [{
+									"Ref": "ServiceName"
+								},
+								"Container"
+							]
+						]
+					},
+					"Essential": "true",
+					"Image": {
+						"Ref": "Image"
+					},
+					"MemoryReservation": {
+						"Ref": "MemoryReservation"
+					},
+					"PortMappings": [{
+						"ContainerPort": {
+							"Ref": "ContainerPort"
+						},
+						"HostPort": 0,
+						"Protocol": "tcp"
+					}],
+					"LogConfiguration": {
+						"LogDriver": "awslogs",
+						"Options": {
+							"awslogs-group": {
+								"Ref": "ECSServiceLogGroup"
+							},
+							"awslogs-region": {
+								"Ref": "AWS::Region"
+							},
+							"awslogs-stream-prefix": "service-log"
+						}
+					}
+				}],
+				"Family": {
+					"Ref": "ServiceName"
+				},
+				"RequiresCompatibilities": ["EC2"],
+				"NetworkMode": "bridge",
+				"TaskRoleArn": {
+					"Ref": "ECSTaskRole"
+				}
+			}
+		},
+		"Service": {
+			"Type": "AWS::ECS::Service",
+			"Properties": {
+				"Cluster": {
+					"Ref": "ClusterName"
+				},
+				"DeploymentConfiguration": {
+					"MaximumPercent": 200,
+					"MinimumHealthyPercent": 50
+				},
+				"DesiredCount": {
+					"Ref": "DesiredCount"
+				},
+				"LaunchType": "EC2",
+				"PlacementStrategies": [{
+						"Field": "attribute:ecs.availability-zone",
+						"Type": "spread"
+					},
+					{
+						"Field": "instanceId",
+						"Type": "spread"
+					}
+				],
+				"ServiceName": {
+					"Ref": "ServiceName"
+				},
+				"TaskDefinition": {
+					"Ref": "ServiceTaskDefinition"
+				},
+				"ServiceRegistries": [{
+                    "ContainerName": {
+                        "Fn::Join": [
+                            "", [{
+                                    "Ref": "ServiceName"
+                                },
+                                "Container"
+                            ]
+                        ]
+                    },
+                    "ContainerPort": {
+                        "Ref": "ContainerPort"
+                    },
+                    "RegistryArn": {
+                        "Fn::GetAtt": [
+                            "ServiceDiscovery",
+                            "Arn"
+                        ]
+                    }
+                }]
+			}
+		},
+		"ServiceScalableTarget": {
+			"Type": "AWS::ApplicationAutoScaling::ScalableTarget",
+			"DependsOn": ["Service"],
+			"Properties": {
+				"MaxCapacity": {
+					"Ref": "ScaleMaxCapacity"
+				},
+				"MinCapacity": {
+					"Ref": "ScaleMinCapacity"
+				},
+				"ResourceId": {
+					"Fn::Join": [
+						"", [
+							"service/",
+							{
+								"Ref": "ClusterName"
+							}, "/", {
+								"Ref": "ServiceName"
+							}
+						]
+					]
+				},
+				"RoleARN": {
+					"Ref": "ECSServiceAutoscalingRole"
+				},
+				"ScalableDimension": "ecs:service:DesiredCount",
+				"ServiceNamespace": "ecs"
+			}
+		},
+		"ServiceScaleDownPolicy": {
+			"Type": "AWS::ApplicationAutoScaling::ScalingPolicy",
+			"Properties": {
+				"PolicyName": {
+					"Fn::Join": [
+						"", [{
+								"Ref": "ServiceName"
+							},
+							"ScaleDownPolicy"
+						]
+					]
+				},
+				"PolicyType": "StepScaling",
+				"ScalingTargetId": {
+					"Ref": "ServiceScalableTarget"
+				},
+				"StepScalingPolicyConfiguration": {
+					"AdjustmentType": "ChangeInCapacity",
+					"Cooldown": 300,
+					"MetricAggregationType": "Average",
+					"StepAdjustments": [{
+						"MetricIntervalUpperBound": 0,
+						"ScalingAdjustment": -1
+					}]
+				}
+			}
+		},
+		"ServiceScaleDownAlarm": {
+			"Type": "AWS::CloudWatch::Alarm",
+			"Properties": {
+				"AlarmActions": [{
+					"Ref": "ServiceScaleDownPolicy"
+				}],
+				"AlarmDescription": "Alarm if CPU too low",
+				"AlarmName": {
+					"Fn::Join": [
+						"", [{
+								"Ref": "ServiceName"
+							},
+							"ScaleDownAlarm",
+							"-", {
+								"Ref": "EnvironmentName"
+							}
+						]
+					]
+				},
+				"ComparisonOperator": "LessThanThreshold",
+				"Dimensions": [{
+						"Name": "ClusterName",
+						"Value": {
+							"Ref": "ClusterName"
+						}
+					},
+					{
+						"Name": "ServiceName",
+						"Value": {
+							"Ref": "ServiceName"
+						}
+					}
+				],
+				"Unit": "Percent",
+				"EvaluationPeriods": 1,
+				"MetricName": "CPUUtilization",
+				"Namespace": "AWS/ECS",
+				"Period": 60,
+				"Statistic": "Average",
+				"Threshold": {
+					"Ref": "ScaleDownThreshold"
+				}
+			}
+		},
+		"ServiceScaleUpPolicy": {
+			"Type": "AWS::ApplicationAutoScaling::ScalingPolicy",
+			"Properties": {
+				"PolicyName": {
+					"Fn::Join": [
+						"", [{
+								"Ref": "ServiceName"
+							},
+							"ScaleUpPolicy"
+						]
+					]
+				},
+				"PolicyType": "StepScaling",
+				"ScalingTargetId": {
+					"Ref": "ServiceScalableTarget"
+				},
+				"StepScalingPolicyConfiguration": {
+					"AdjustmentType": "ChangeInCapacity",
+					"Cooldown": 300,
+					"MetricAggregationType": "Average",
+					"StepAdjustments": [{
+						"MetricIntervalLowerBound": 0,
+						"ScalingAdjustment": 1
+					}]
+				}
+			}
+		},
+		"ServiceScaleUpAlarm": {
+			"Properties": {
+				"AlarmActions": [{
+					"Ref": "ServiceScaleUpPolicy"
+				}],
+				"AlarmDescription": "Alarm if CPU too high",
+				"AlarmName": {
+					"Fn::Join": [
+						"", [{
+								"Ref": "ServiceName"
+							},
+							"ScaleUpAlarm",
+							"-", {
+								"Ref": "EnvironmentName"
+							}
+						]
+					]
+				},
+				"ComparisonOperator": "GreaterThanThreshold",
+				"Dimensions": [{
+						"Name": "ClusterName",
+						"Value": {
+							"Ref": "ClusterName"
+						}
+					},
+					{
+						"Name": "ServiceName",
+						"Value": {
+							"Ref": "ServiceName"
+						}
+					}
+				],
+				"Unit": "Percent",
+				"EvaluationPeriods": 1,
+				"MetricName": "CPUUtilization",
+				"Namespace": "AWS/ECS",
+				"Period": 60,
+				"Statistic": "Average",
+				"Threshold": {
+					"Ref": "ScaleUpThreshold"
+				}
+			},
+			"Type": "AWS::CloudWatch::Alarm"
+		},
+		"ServiceScaleDownPolicyMemory": {
+			"Type": "AWS::ApplicationAutoScaling::ScalingPolicy",
+			"Properties": {
+				"PolicyName": {
+					"Fn::Join": [
+						"", [{
+								"Ref": "ServiceName"
+							},
+							"ScaleDownPolicyMemory"
+						]
+					]
+				},
+				"PolicyType": "StepScaling",
+				"ScalingTargetId": {
+					"Ref": "ServiceScalableTarget"
+				},
+				"StepScalingPolicyConfiguration": {
+					"AdjustmentType": "ChangeInCapacity",
+					"Cooldown": 300,
+					"MetricAggregationType": "Average",
+					"StepAdjustments": [{
+						"MetricIntervalUpperBound": 0,
+						"ScalingAdjustment": -1
+					}]
+				}
+			}
+		},
+		"ServiceScaleDownAlarmMemory": {
+			"Type": "AWS::CloudWatch::Alarm",
+			"Properties": {
+				"AlarmActions": [{
+					"Ref": "ServiceScaleDownPolicyMemory"
+				}],
+				"AlarmDescription": "Alarm if Memory too low",
+				"AlarmName": {
+					"Fn::Join": [
+						"", [{
+								"Ref": "ServiceName"
+							},
+							"ScaleDownAlarmMemory",
+							"-", {
+								"Ref": "EnvironmentName"
+							}
+						]
+					]
+				},
+				"ComparisonOperator": "LessThanThreshold",
+				"Dimensions": [{
+						"Name": "ClusterName",
+						"Value": {
+							"Ref": "ClusterName"
+						}
+					},
+					{
+						"Name": "ServiceName",
+						"Value": {
+							"Ref": "ServiceName"
+						}
+					}
+				],
+				"Unit": "Percent",
+				"EvaluationPeriods": 1,
+				"MetricName": "MemoryUtilization",
+				"Namespace": "AWS/ECS",
+				"Period": 60,
+				"Statistic": "Average",
+				"Threshold": {
+					"Ref": "ScaleDownThreshold"
+				}
+			}
+		},
+		"ServiceScaleUpPolicyMemory": {
+			"Type": "AWS::ApplicationAutoScaling::ScalingPolicy",
+			"Properties": {
+				"PolicyName": {
+					"Fn::Join": [
+						"", [{
+								"Ref": "ServiceName"
+							},
+							"ScaleUpPolicyMemory"
+						]
+					]
+				},
+				"PolicyType": "StepScaling",
+				"ScalingTargetId": {
+					"Ref": "ServiceScalableTarget"
+				},
+				"StepScalingPolicyConfiguration": {
+					"AdjustmentType": "ChangeInCapacity",
+					"Cooldown": 300,
+					"MetricAggregationType": "Average",
+					"StepAdjustments": [{
+						"MetricIntervalLowerBound": 0,
+						"ScalingAdjustment": 1
+					}]
+				}
+			}
+		},
+		"ServiceScaleUpAlarmMemory": {
+			"Properties": {
+				"AlarmActions": [{
+					"Ref": "ServiceScaleUpPolicyMemory"
+				}],
+				"AlarmDescription": "Alarm if Memory too high",
+				"AlarmName": {
+					"Fn::Join": [
+						"", [{
+								"Ref": "ServiceName"
+							},
+							"ScaleUpAlarmMemory",
+							"-", {
+								"Ref": "EnvironmentName"
+							}
+						]
+					]
+				},
+				"ComparisonOperator": "GreaterThanThreshold",
+				"Dimensions": [{
+						"Name": "ClusterName",
+						"Value": {
+							"Ref": "ClusterName"
+						}
+					},
+					{
+						"Name": "ServiceName",
+						"Value": {
+							"Ref": "ServiceName"
+						}
+					}
+				],
+				"Unit": "Percent",
+				"EvaluationPeriods": 1,
+				"MetricName": "MemoryUtilization",
+				"Namespace": "AWS/ECS",
+				"Period": 60,
+				"Statistic": "Average",
+				"Threshold": {
+					"Ref": "ScaleUpThreshold"
+				}
+			},
+			"Type": "AWS::CloudWatch::Alarm"
+		},
+		"ServiceDiscovery": {
+			"Type": "AWS::ServiceDiscovery::Service",
+			"Properties": {
+			  "Description": "Service Discovery",
+			  "DnsConfig": {
+				"DnsRecords": [
+				  {
+					"TTL": 60,
+					"Type": "SRV"
+				  }
+				],
+				"NamespaceId": {
+					"Ref": "NameSpaceId"
+				}
+			  },
+			  "HealthCheckCustomConfig": {
+				"FailureThreshold": 1
+			  },
+			  "Name": {
+				  "Ref": "ServiceName"
+			  }
+			}
+		}
+	}
+}
